@@ -173,7 +173,6 @@ app.post('/api/run-test', async (req, res) => {
     let browser;
     
     try {
-        const { google } = require('googleapis'); // (Nếu trên cùng của file chưa có dòng này)
         const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_CLIENT_EMAIL,
