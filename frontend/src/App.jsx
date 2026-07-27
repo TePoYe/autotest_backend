@@ -103,7 +103,7 @@ export default function App() {
     pushLog("Đang gửi yêu cầu kiểm thử đến API...", "info", "🌐");
 
     try {
-      const response = await fetch("http://localhost:3000/api/run-test", {
+      const response = await fetch("https://autotest-backend-sior.onrender.com", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
