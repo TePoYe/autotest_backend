@@ -27,10 +27,10 @@ const LOG_STYLES = {
 
 // Kịch bản mẫu để người dùng nạp nhanh và thử các nút chức năng
 const SAMPLE_SCENARIO = {
-  url: "https://demo-shop.example.com",
-  iconSelector: "#chatbot-icon",
-  inputSelector: ".chat-input",
-  sheetUrl: "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit",
+  url: "https://hopdonglaodongdientu.vn/",
+  iconSelector: "#arito-chatbot-root button.sh-fab",
+  inputSelector: "textarea.sh-input-field",
+  sheetUrl: "https://docs.google.com/spreadsheets/d/1RnoPdtwDqlLKQySUrgJ0iqYGvyVWZCeKf-T-t3sPjkE/edit?usp=sharing",
 };
 
 function StatusDot({ active }) {
@@ -103,7 +103,7 @@ export default function App() {
     pushLog("Đang gửi yêu cầu kiểm thử đến API...", "info", "🌐");
 
     try {
-      const response = await fetch("https://autotest-backend-sior.onrender.com", {
+      const response = await fetch("https://autotest-backend-sior.onrender.com/api/run-test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
