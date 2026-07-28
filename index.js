@@ -200,10 +200,18 @@ app.post('/api/run-test', async (req, res) => {
         })).filter(tc => tc.question);
 
         // Khởi động browser
-        browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-        const page = await browser.newPage();
-        await page.goto(targetUrl, { waitUntil: 'networkidle' });
-
+        // Khởi động browser với chế độ tối ưu RAM
+    browser = await chromium.launch({ 
+        headless: true, 
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage', // Cực kỳ quan trọng: Vô hiệu hóa phân vùng bộ nhớ chung, chống tràn RAM trên Linux
+            '--disable-gpu',           // Tắt xử lý đồ họa vì mình chỉ chạy ngầm
+            '--single-process',        // Ép chạy trên 1 tiến trình duy nhất
+            '--no-zygote'              // Tắt các tiến trình con không cần thiết
+        ] 
+    });
         // Mở chatbot
         if (chatbotIconSelector) {
             await page.waitForSelector(chatbotIconSelector, { timeout: 10000 });
@@ -235,6 +243,7 @@ app.post('/api/run-test', async (req, res) => {
         });
     } finally {
         if (browser) await browser.close();
+        console.log("Đã đóng trình duyệt, giải phóng RAM.");
     }
 });
 
