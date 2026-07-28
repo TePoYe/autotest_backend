@@ -212,6 +212,11 @@ app.post('/api/run-test', async (req, res) => {
             '--no-zygote'              // Tắt các tiến trình con không cần thiết
         ] 
     });
+        // 2. THÊM DÒNG NÀY VÀO (Để mở page)
+         const page = await browser.newPage(); // Mở một tab mới
+        // 3. Cho tab đó truy cập vào trang web đích
+         await page.goto(targetUrl, { waitUntil: 'networkidle' });
+
         // Mở chatbot
         if (chatbotIconSelector) {
             await page.waitForSelector(chatbotIconSelector, { timeout: 10000 });
