@@ -7,6 +7,7 @@ import { chromium } from 'playwright';
 import { google } from 'googleapis';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import 'dotenv/config';
+import { selectLatestBotAnswer } from './botReplyUtils.js';
 
 process.env.PLAYWRIGHT_BROWSERS_PATH = "0";
 
@@ -40,28 +41,33 @@ const auth = new google.auth.GoogleAuth({
 async function askChatbot(page, question, chatInputSelector = '.sh-input-field') {
     try {
         const botMsgSelector = '.sh-msg-wrapper.bot';
-        
-        // Đếm số lượng câu trả lời của bot ĐANG CÓ trên màn hình trước khi hỏi
-        const beforeCount = await page.locator(botMsgSelector).count();
+        const botReplySelector = `${botMsgSelector} .sh-msg-bot`;
 
-        // Nhập câu hỏi và bấm Enter
+        const previousTexts = await page.locator(botReplySelector).allTextContents();
+        const beforeCount = previousTexts.length;
+
         await page.fill(chatInputSelector, question);
         await page.keyboard.press('Enter');
 
-        // KIÊN NHẪN CHỜ ĐỢI: Chờ đến khi số lượng tin nhắn của bot tăng thêm ít nhất 1
-        await page.waitForFunction(
-            (args) => document.querySelectorAll(args.selector).length > args.count,
-            { selector: botMsgSelector, count: beforeCount },
-            { timeout: 15000 } // Chờ tối đa 15s cho mỗi câu
-        );
+        const deadline = Date.now() + 15000;
+        let answer = null;
 
-        // Chờ thêm 1 giây để hiệu ứng UI (nếu có) hiển thị chữ xong hẳn
-        await page.waitForTimeout(1000);
+        while (Date.now() < deadline) {
+            const currentTexts = await page.locator(botReplySelector).allTextContents();
+            answer = selectLatestBotAnswer(
+                currentTexts,
+                beforeCount,
+                previousTexts[previousTexts.length - 1]
+            );
 
-        // Lúc này mới được lấy nội dung của cái tin nhắn mới nhất
-        const answer = await page.textContent(`${botMsgSelector}:last-child .sh-msg-bot`);
-        return answer.trim();
-        
+            if (answer) {
+                break;
+            }
+
+            await page.waitForTimeout(500);
+        }
+
+        return (answer || '').trim();
     } catch (error) {
         console.error("❌ Lỗi khi hỏi chatbot:", error.message);
         throw error;
@@ -103,7 +109,7 @@ async function judgeAnswer(expected, actual) {
 // ==========================================
 // 5. HÀM CHẠY TEST CHÍNH
 // ==========================================
-async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector) {
+async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector, sheets) {
     let results = { pass: 0, partial: 0, fail: 0, total: testCases.length, details: [] };
 
     for (let i = 0; i < testCases.length; i++) {
@@ -226,7 +232,7 @@ app.post('/api/run-test', async (req, res) => {
     });
         // domcontentloaded sẽ giúp nó tải xong khung web là dừng, không chờ mấy cái script quảng cáo chạy ẩn nữa
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        
+
         // Mở chatbot
         if (chatbotIconSelector) {
             await page.waitForSelector(chatbotIconSelector, { timeout: 10000 });
