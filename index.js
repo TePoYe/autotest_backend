@@ -215,8 +215,18 @@ app.post('/api/run-test', async (req, res) => {
         // 2. THÊM DÒNG NÀY VÀO (Để mở page)
          const page = await browser.newPage(); // Mở một tab mới
         // 3. Cho tab đó truy cập vào trang web đích
-         await page.goto(targetUrl, { waitUntil: 'networkidle' });
-
+        // THÊM ĐOẠN NÀY VÀO: Chặn tải hình ảnh, CSS, video, font chữ để tiết kiệm 70% RAM
+    await page.route('**/*', (route) => {
+        const type = route.request().resourceType();
+        if (['image', 'stylesheet', 'media', 'font'].includes(type)) {
+            route.abort(); // Từ chối tải
+        } else {
+            route.continue(); // Cho phép tải HTML, JS, API (để Chatbot hoạt động)
+        }
+    });
+        // domcontentloaded sẽ giúp nó tải xong khung web là dừng, không chờ mấy cái script quảng cáo chạy ẩn nữa
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        
         // Mở chatbot
         if (chatbotIconSelector) {
             await page.waitForSelector(chatbotIconSelector, { timeout: 10000 });
