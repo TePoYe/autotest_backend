@@ -109,6 +109,17 @@ async function judgeAnswer(expected, actual) {
 // ==========================================
 // 5. HÀM CHẠY TEST CHÍNH
 // ==========================================
+async function writeResultToSheet(sheets, spreadsheetId, sheetName, rowNumber, actualAnswer, scoreResult) {
+    await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!D${rowNumber}:E${rowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [[actualAnswer, scoreResult]],
+        },
+    });
+}
+
 async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector, sheets) {
     let results = { pass: 0, partial: 0, fail: 0, total: testCases.length, details: [] };
 
@@ -135,14 +146,7 @@ async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInput
             });
 
             // Ghi vào Google Sheet
-            await sheets.spreadsheets.values.update({
-                spreadsheetId: spreadsheetId,
-                range: `${sheetName}!D${rowNumber}:E${rowNumber}`,
-                valueInputOption: 'USER_ENTERED',
-                requestBody: {
-                    values: [[actualAnswer, scoreResult]],
-                },
-            });
+            await writeResultToSheet(sheets, spreadsheetId, sheetName, rowNumber, actualAnswer, scoreResult);
 
             console.log(`  └ Kết quả: ${scoreResult}`);
             await page.waitForTimeout(1000);
@@ -160,7 +164,7 @@ async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInput
 // 6. API ENDPOINT
 // ==========================================
 app.post('/api/run-test', async (req, res) => {
-    const { targetUrl, chatbotIconSelector, chatInputSelector, sheetUrl } = req.body;
+    const { targetUrl, chatbotIconSelector, chatInputSelector, sheetUrl, sheetName: requestedSheetName } = req.body;
     
     // Validate inputs
     if (!targetUrl || !sheetUrl) {
@@ -188,7 +192,7 @@ app.post('/api/run-test', async (req, res) => {
     });
     const sheets = google.sheets({ version: 'v4', auth });
         // Đọc dữ liệu từ Google Sheet
-        const sheetName = 'Trang tính1';
+        const sheetName = requestedSheetName || 'Trang tính1';
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
             range: `${sheetName}!B2:C`,
@@ -243,11 +247,12 @@ app.post('/api/run-test', async (req, res) => {
 
         // Chạy các test cases
         const results = await runTestCases(
-            page, 
-            testCases, 
-            spreadsheetId, 
-            sheetName, 
-            chatInputSelector || '.sh-input-field'
+            page,
+            testCases,
+            spreadsheetId,
+            sheetName,
+            chatInputSelector || '.sh-input-field',
+            sheets
         );
 
         res.json({ 
