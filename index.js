@@ -136,64 +136,75 @@ async function writeResultToSheet(sheets, spreadsheetId, sheetName, rowNumber, a
 // 5. HÀM CHẠY TEST CHÍNH (ĐÃ TỐI ƯU BATCHING)
 // ==========================================
 async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector, sheets, sendEvent) {
-    let results = { pass: 0, partial: 0, fail: 0, total: testCases.length, details: [] };
-    let testPairs = [];
+    // `testCases` here should include original row positions: each item { question, expected, rowNumber }
+    const totalQuestions = testCases.filter(t => t.question).length;
+    let results = { pass: 0, partial: 0, fail: 0, total: totalQuestions, details: [] };
 
-    // GIAI ĐOẠN 1: Tương tác Chatbot lấy tất cả câu trả lời (Không gọi Gemini ở đây)
+    const testPairs = []; // only non-empty tests to send to Gemini
+    const originalIndexes = []; // map testPairs index -> original testCases index
+
+    // GIAI ĐOẠN 1: Tương tác Chatbot lấy tất cả câu trả lời (chỉ với các câu có nội dung)
+    let executedCount = 0;
     for (let i = 0; i < testCases.length; i++) {
         const test = testCases[i];
-        try {
-            // 📢 PHÁT LOA: Báo cho Frontend biết đang chạy câu nào
-            sendEvent({ type: "progress", message: `Đang lấy câu trả lời câu ${i + 1}/${testCases.length}...` });
+        if (!test.question) continue; // giữ vị trí, bỏ qua ô trống
 
-            console.log(`\n▶ Đang lấy câu trả lời từ Bot câu ${i + 1}/${testCases.length}...`);
+        try {
+            executedCount++;
+            sendEvent({ type: "progress", message: `Đang lấy câu trả lời câu ${executedCount}/${totalQuestions}...` });
+            console.log(`\n▶ Đang lấy câu trả lời từ Bot (${executedCount}/${totalQuestions})...`);
             const actualAnswer = await askChatbot(page, test.question, chatInputSelector);
             testPairs.push({ question: test.question, expected: test.expected, actual: actualAnswer });
-            await page.waitForTimeout(500); 
+            originalIndexes.push(i);
+            await page.waitForTimeout(500);
         } catch (error) {
-            console.error(`❌ Lỗi ở câu ${i + 1}:`, error.message);
+            console.error(`❌ Lỗi ở câu (original index ${i}):`, error.message);
             testPairs.push({ question: test.question, expected: test.expected, actual: "[ERROR] Bot không trả lời" });
+            originalIndexes.push(i);
         }
     }
 
-    // GIAI ĐOẠN 2: Gọi Gemini 1 LẦN để chấm điểm tất cả
+    // GIAI ĐOẠN 2: Gọi Gemini 1 LẦN để chấm điểm tất cả các câu đã thu
     sendEvent({ type: "progress", message: `🤖 Đang gửi ${testPairs.length} câu cho AI Gemini chấm điểm...` });
     console.log(`\n🤖 Đang gửi ${testPairs.length} câu cho Gemini chấm điểm chung...`);
     const judgments = await judgeAnswerBatch(testPairs);
 
-    // GIAI ĐOẠN 3: Xử lý đếm kết quả và gom dữ liệu ghi Google Sheet
-    const sheetUpdateValues = []; // Mảng chứa dữ liệu đẩy lên Sheet
+    // GIAI ĐOẠN 3: Xử lý đếm kết quả và chuẩn bị mảng ghi Google Sheet theo đúng vị trí ban đầu
+    // Khởi tạo mảng có đúng số dòng bằng testCases.length để giữ nguyên vị trí
+    const sheetUpdateValuesFull = testCases.map(() => ["", ""]);
 
-    for (let i = 0; i < testPairs.length; i++) {
-        const pair = testPairs[i];
-        // Tìm điểm số tương ứng theo ID từ Gemini trả về
-        const scoreResult = judgments.find(j => j.id === i)?.judgment || "[ERROR] Lỗi chấm điểm";
+    for (let k = 0; k < testPairs.length; k++) {
+        const pair = testPairs[k];
+        const originalIdx = originalIndexes[k];
+        const scoreResult = judgments.find(j => j.id === k)?.judgment || "[ERROR] Lỗi chấm điểm";
 
-        // Đếm logic (Phiên bản chuẩn chỉnh)
         const scoreUpper = scoreResult.toUpperCase();
         if (scoreUpper.includes('[PASS]')) results.pass++;
         else if (scoreUpper.includes('[PARTIAL]')) results.partial++;
         else results.fail++;
 
         results.details.push({
-            question: pair.question, expected: pair.expected,
-            actual: pair.actual, judgment: scoreResult
+            rowNumber: testCases[originalIdx].rowNumber,
+            question: pair.question,
+            expected: pair.expected,
+            actual: pair.actual,
+            judgment: scoreResult
         });
 
-        // Đưa vào mảng dữ liệu Google Sheet [Thực tế, Đánh giá]
-        sheetUpdateValues.push([pair.actual, scoreResult]);
-        console.log(`  └ Câu ${i + 1}: ${scoreResult}`);
+        // Đặt giá trị vào vị trí tương ứng (originalIdx)
+        sheetUpdateValuesFull[originalIdx] = [pair.actual, scoreResult];
+        console.log(`  └ Original row ${testCases[originalIdx].rowNumber}: ${scoreResult}`);
     }
 
-    // GIAI ĐOẠN 4: Ghi TẤT CẢ vào Google Sheet bằng 1 lệnh duy nhất!
+    // GIAI ĐOẠN 4: Ghi TOÀN BỘ vùng D2:E(1+N) tương ứng số hàng ban đầu
     try {
         sendEvent({ type: "progress", message: `📝 Đang ghi báo cáo vào Google Sheet...` });
         console.log("\n📝 Đang ghi toàn bộ báo cáo vào Google Sheet...");
         await sheets.spreadsheets.values.update({
             spreadsheetId: spreadsheetId,
-            range: `${sheetName}!D2:E${1 + sheetUpdateValues.length}`, // Quét 1 vùng lớn để ghi
+            range: `${sheetName}!D2:E${1 + sheetUpdateValuesFull.length}`,
             valueInputOption: 'USER_ENTERED',
-            requestBody: { values: sheetUpdateValues },
+            requestBody: { values: sheetUpdateValuesFull },
         });
         console.log("✅ Đã ghi thành công!");
     } catch (sheetError) {
@@ -261,10 +272,13 @@ app.post('/api/run-test', async (req, res) => {
             return res.end();
         }
 
-        const testCases = rows.map(row => ({
+        // Map rows to include original sheet row numbers so we can preserve alignment
+        // rows corresponds to range B2:C so its first entry is sheet row 2
+        const testCases = rows.map((row, idx) => ({
             question: row[0] || '',
-            expected: row[1] || ''
-        })).filter(tc => tc.question);
+            expected: row[1] || '',
+            rowNumber: 2 + idx
+        }));
 
         browser = await chromium.launch({ 
             headless: true, 

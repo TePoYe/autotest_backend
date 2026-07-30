@@ -118,22 +118,75 @@ export default function App() {
         throw new Error(`Máy chủ trả về lỗi HTTP ${response.status}`);
       }
 
-      pushLog("Đã nhận phản hồi từ máy chủ, đang xử lý dữ liệu...", "info", "📄");
+      pushLog("Đã kết nối tới server, đang lắng nghe luồng SSE...", "info", "📄");
 
-      const result = await response.json();
+      // Mở bộ đọc luồng SSE
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
 
-      if (result.status !== "success" || !result.data) {
-        throw new Error("Phản hồi API không đúng định dạng mong đợi");
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Backend gửi theo block: data: {...}\n\n
+        const parts = buffer.split("\n\n");
+        // Xử lý mọi block hoàn chỉnh, giữ lại phần thừa ở cuối
+        for (let i = 0; i < parts.length - 1; i++) {
+          const block = parts[i].trim();
+          if (!block) continue;
+
+          const lines = block.split("\n");
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const dataStr = line.replace(/^data: /, "").trim();
+            if (!dataStr) continue;
+
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (parsed.type === "progress") {
+                pushLog(parsed.message || "...", "info", "📄");
+              } else if (parsed.type === "success") {
+                pushLog(parsed.message || "Hoàn tất", "success", "✅");
+                const d = parsed.data || {};
+                setResults({ pass: d.pass ?? 0, partial: d.partial ?? 0, fail: d.fail ?? 0 });
+                setStatus("done");
+              } else if (parsed.type === "error") {
+                pushLog(parsed.message || "Lỗi từ server", "error", "❌");
+                setStatus("error");
+              }
+            } catch (e) {
+              pushLog(`Lỗi parse SSE JSON: ${e.message}`, "error", "❌");
+            }
+          }
+        }
+
+        buffer = parts[parts.length - 1];
       }
 
-      pushLog("Kiểm thử hoàn tất thành công", "success", "✅");
-
-      setResults({
-        pass: result.data.pass ?? 0,
-        partial: result.data.partial ?? 0,
-        fail: result.data.fail ?? 0,
-      });
-      setStatus("done");
+      // Nếu vẫn còn dữ liệu chưa xử lý trong buffer khi stream kết thúc
+      if (buffer.trim()) {
+        const remainingLines = buffer.split("\n");
+        for (const line of remainingLines) {
+          if (!line.startsWith("data: ")) continue;
+          const dataStr = line.replace(/^data: /, "").trim();
+          try {
+            const parsed = JSON.parse(dataStr);
+            if (parsed.type === "success") {
+              const d = parsed.data || {};
+              setResults({ pass: d.pass ?? 0, partial: d.partial ?? 0, fail: d.fail ?? 0 });
+              setStatus("done");
+            } else if (parsed.type === "error") {
+              pushLog(parsed.message || "Lỗi từ server", "error", "❌");
+              setStatus("error");
+            }
+          } catch (e) {
+            /* ignore */
+          }
+        }
+      }
     } catch (err) {
       pushLog(
         `Lỗi khi gọi API: ${err.message || "Không thể kết nối đến máy chủ"}`,
