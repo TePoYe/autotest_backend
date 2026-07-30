@@ -135,7 +135,7 @@ async function writeResultToSheet(sheets, spreadsheetId, sheetName, rowNumber, a
 // ==========================================
 // 5. HÀM CHẠY TEST CHÍNH (ĐÃ TỐI ƯU BATCHING)
 // ==========================================
-async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector, sheets) {
+async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector, sheets, sendEvent) {
     let results = { pass: 0, partial: 0, fail: 0, total: testCases.length, details: [] };
     let testPairs = [];
 
@@ -143,6 +143,9 @@ async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInput
     for (let i = 0; i < testCases.length; i++) {
         const test = testCases[i];
         try {
+            // 📢 PHÁT LOA: Báo cho Frontend biết đang chạy câu nào
+            sendEvent({ type: "progress", message: `Đang lấy câu trả lời câu ${i + 1}/${testCases.length}...` });
+
             console.log(`\n▶ Đang lấy câu trả lời từ Bot câu ${i + 1}/${testCases.length}...`);
             const actualAnswer = await askChatbot(page, test.question, chatInputSelector);
             testPairs.push({ question: test.question, expected: test.expected, actual: actualAnswer });
@@ -154,6 +157,7 @@ async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInput
     }
 
     // GIAI ĐOẠN 2: Gọi Gemini 1 LẦN để chấm điểm tất cả
+    sendEvent({ type: "progress", message: `🤖 Đang gửi ${testPairs.length} câu cho AI Gemini chấm điểm...` });
     console.log(`\n🤖 Đang gửi ${testPairs.length} câu cho Gemini chấm điểm chung...`);
     const judgments = await judgeAnswerBatch(testPairs);
 
@@ -183,6 +187,7 @@ async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInput
 
     // GIAI ĐOẠN 4: Ghi TẤT CẢ vào Google Sheet bằng 1 lệnh duy nhất!
     try {
+        sendEvent({ type: "progress", message: `📝 Đang ghi báo cáo vào Google Sheet...` });
         console.log("\n📝 Đang ghi toàn bộ báo cáo vào Google Sheet...");
         await sheets.spreadsheets.values.update({
             spreadsheetId: spreadsheetId,
@@ -199,37 +204,51 @@ async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInput
 }
 
 // ==========================================
-// 6. API ENDPOINT
+// 6. API ENDPOINT (SSE STREAMING)
 // ==========================================
 app.post('/api/run-test', async (req, res) => {
+    // 1. Cấu hình Headers cho phép truyền dữ liệu liên tục (SSE)
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Hàm tiện ích để gửi dữ liệu về Giao diện ngay lập tức
+    const sendEvent = (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // BẢO TOÀN LOGIC CŨ: Nhận requestedSheetName từ Frontend
     const { targetUrl, chatbotIconSelector, chatInputSelector, sheetUrl, sheetName: requestedSheetName } = req.body;
     
-    // Validate inputs
     if (!targetUrl || !sheetUrl) {
-        return res.status(400).json({ error: "targetUrl và sheetUrl là bắt buộc!" });
+        sendEvent({ type: "error", message: "targetUrl và sheetUrl là bắt buộc!" });
+        return res.end();
     }
 
-    // Tách ID Google Sheet
     const sheetIdMatch = sheetUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
     const spreadsheetId = sheetIdMatch ? sheetIdMatch[1] : null;
 
     if (!spreadsheetId) {
-        return res.status(400).json({ error: "Link Google Sheet không hợp lệ!" });
+        sendEvent({ type: "error", message: "Link Google Sheet không hợp lệ!" });
+        return res.end();
     }
 
-    console.log(`🚀 Bắt đầu test cho: ${targetUrl}`);
+    sendEvent({ type: "progress", message: "🚀 Đang khởi động trình duyệt ẩn..." });
     let browser;
     
     try {
         const auth = new google.auth.GoogleAuth({
-        credentials: {
-            client_email: process.env.GOOGLE_CLIENT_EMAIL,
-            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        },
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
-        // Đọc dữ liệu từ Google Sheet
+            credentials: {
+                client_email: process.env.GOOGLE_CLIENT_EMAIL,
+                private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            },
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+        
+        sendEvent({ type: "progress", message: "📄 Đang đọc dữ liệu kịch bản từ Google Sheet..." });
+        
+        // BẢO TOÀN LOGIC CŨ: Cho phép truyền tên Sheet động
         const sheetName = requestedSheetName || 'Trang tính1';
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
@@ -238,76 +257,54 @@ app.post('/api/run-test', async (req, res) => {
         
         const rows = response.data.values;
         if (!rows || rows.length === 0) {
-            return res.status(400).json({ error: "Không tìm thấy dữ liệu trên Sheet!" });
+            sendEvent({ type: "error", message: "Không tìm thấy dữ liệu trên Sheet!" });
+            return res.end();
         }
 
-        // Chuyển đổi dữ liệu thành test cases
         const testCases = rows.map(row => ({
             question: row[0] || '',
             expected: row[1] || ''
         })).filter(tc => tc.question);
 
-        // Khởi động browser
-        // Khởi động browser với chế độ tối ưu RAM
-    browser = await chromium.launch({ 
-        headless: true, 
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // Cực kỳ quan trọng: Vô hiệu hóa phân vùng bộ nhớ chung, chống tràn RAM trên Linux
-            '--disable-gpu',           // Tắt xử lý đồ họa vì mình chỉ chạy ngầm
-            '--single-process',        // Ép chạy trên 1 tiến trình duy nhất
-            '--no-zygote'              // Tắt các tiến trình con không cần thiết
-        ] 
-    });
-        // 2. THÊM DÒNG NÀY VÀO (Để mở page)
-         const page = await browser.newPage(); // Mở một tab mới
-        // 3. Cho tab đó truy cập vào trang web đích
-        // THÊM ĐOẠN NÀY VÀO: Chặn tải hình ảnh, CSS, video, font chữ để tiết kiệm 70% RAM
-    await page.route('**/*', (route) => {
-        const type = route.request().resourceType();
-        if (['image', 'stylesheet', 'media', 'font'].includes(type)) {
-            route.abort(); // Từ chối tải
-        } else {
-            route.continue(); // Cho phép tải HTML, JS, API (để Chatbot hoạt động)
-        }
-    });
-        // domcontentloaded sẽ giúp nó tải xong khung web là dừng, không chờ mấy cái script quảng cáo chạy ẩn nữa
+        browser = await chromium.launch({ 
+            headless: true, 
+            args: [
+                '--no-sandbox', '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage', '--disable-gpu',           
+                '--single-process', '--no-zygote'              
+            ] 
+        });
+        
+        const page = await browser.newPage();
+        await page.route('**/*', (route) => {
+            const type = route.request().resourceType();
+            if (['image', 'stylesheet', 'media', 'font'].includes(type)) route.abort();
+            else route.continue();
+        });
+        
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-        // Mở chatbot
         if (chatbotIconSelector) {
             await page.waitForSelector(chatbotIconSelector, { timeout: 10000 });
             await page.click(chatbotIconSelector);
-            console.log("✅ Đã mở chatbot");
             await page.waitForTimeout(2000);
         }
 
-        // Chạy các test cases
+        // Truyền thêm hàm sendEvent vào runTestCases
         const results = await runTestCases(
-            page,
-            testCases,
-            spreadsheetId,
-            sheetName,
-            chatInputSelector || '.sh-input-field',
-            sheets
+            page, testCases, spreadsheetId, sheetName, 
+            chatInputSelector || '.sh-input-field', sheets, sendEvent
         );
 
-        res.json({ 
-            status: "success", 
-            message: "Kiểm thử hoàn tất!", 
-            data: results 
-        });
+        // Phát loa báo cáo thành công và gửi toàn bộ dữ liệu cuối cùng
+        sendEvent({ type: "success", message: "Kiểm thử hoàn tất!", data: results });
 
     } catch (error) {
         console.error("❌ Lỗi:", error);
-        res.status(500).json({ 
-            status: "error", 
-            message: error.message 
-        });
+        sendEvent({ type: "error", message: error.message });
     } finally {
         if (browser) await browser.close();
-        console.log("Đã đóng trình duyệt, giải phóng RAM.");
+        res.end(); // 🛑 Kết thúc luồng stream
     }
 });
 
