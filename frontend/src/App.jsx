@@ -131,39 +131,42 @@ export default function App() {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Backend gửi theo block: data: {...}\n\n
-        const parts = buffer.split("\n\n");
-        // Xử lý mọi block hoàn chỉnh, giữ lại phần thừa ở cuối
-        for (let i = 0; i < parts.length - 1; i++) {
-          const block = parts[i].trim();
-          if (!block) continue;
+        const events = buffer.split(/\r?\n\r?\n/);
+        for (let i = 0; i < events.length - 1; i++) {
+          const eventText = events[i].trim();
+          if (!eventText) continue;
 
-          const lines = block.split("\n");
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const dataStr = line.replace(/^data: /, "").trim();
-            if (!dataStr) continue;
+          const dataLines = eventText
+            .split(/\r?\n/)
+            .filter((line) => line.trim().startsWith("data:"));
 
-            try {
-              const parsed = JSON.parse(dataStr);
-              if (parsed.type === "progress") {
-                pushLog(parsed.message || "...", "info", "📄");
-              } else if (parsed.type === "success") {
-                pushLog(parsed.message || "Hoàn tất", "success", "✅");
-                const d = parsed.data || {};
-                setResults({ pass: d.pass ?? 0, partial: d.partial ?? 0, fail: d.fail ?? 0 });
-                setStatus("done");
-              } else if (parsed.type === "error") {
-                pushLog(parsed.message || "Lỗi từ server", "error", "❌");
-                setStatus("error");
-              }
-            } catch (e) {
-              pushLog(`Lỗi parse SSE JSON: ${e.message}`, "error", "❌");
+          if (dataLines.length === 0) continue;
+
+          const dataStr = dataLines
+            .map((line) => line.replace(/^data:\s*/, ""))
+            .join("\n");
+
+          if (!dataStr) continue;
+
+          try {
+            const parsed = JSON.parse(dataStr);
+            if (parsed.type === "progress") {
+              pushLog(parsed.message || "...", "info", "📄");
+            } else if (parsed.type === "success") {
+              pushLog(parsed.message || "Hoàn tất", "success", "✅");
+              const d = parsed.data || {};
+              setResults({ pass: d.pass ?? 0, partial: d.partial ?? 0, fail: d.fail ?? 0 });
+              setStatus("done");
+            } else if (parsed.type === "error") {
+              pushLog(parsed.message || "Lỗi từ server", "error", "❌");
+              setStatus("error");
             }
+          } catch (e) {
+            pushLog(`Lỗi parse SSE JSON: ${e.message}`, "error", "❌");
           }
         }
 
-        buffer = parts[parts.length - 1];
+        buffer = events[events.length - 1];
       }
 
       // Nếu vẫn còn dữ liệu chưa xử lý trong buffer khi stream kết thúc
