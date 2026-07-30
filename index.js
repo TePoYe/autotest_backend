@@ -75,34 +75,46 @@ async function askChatbot(page, question, chatInputSelector = '.sh-input-field')
 }
 
 // ==========================================
-// 4. HÀM CHẤM ĐIỂM BẰNG GEMINI
+// 4. HÀM CHẤM ĐIỂM BẰNG GEMINI (PHIÊN BẢN BATCHING GỘP)
 // ==========================================
-async function judgeAnswer(expected, actual) {
-    if (!expected) return "[SKIP] Không có kết quả kỳ vọng";
-    
-    const prompt = `Bạn là một chuyên gia kiểm thử phần mềm (QA Tester).
-    Hãy so sánh câu trả lời thực tế của Chatbot với kết quả kỳ vọng và đánh giá mức độ khớp nhau về mặt NGỮ NGHĨA.
-    
-    Kỳ vọng: "${expected}"
-    Thực tế: "${actual}"
-    
-    Nhiệm vụ của bạn:
-    1. Phân tích và ước lượng mức độ giống nhau về mặt ý nghĩa (từ 0% đến 100%).
-    2. Phân loại nhãn dựa trên tỷ lệ % theo quy tắc:
-       - [PASS]: Nếu tỷ lệ >= 80%
-       - [PARTIAL]: Nếu tỷ lệ từ 50% đến 79%
-       - [FAIL]: Nếu tỷ lệ < 50%
-    3. Định dạng đầu ra (một dòng duy nhất):
-    [NHÃN] (X%) - Giải thích ngắn gọn lý do.
-    
-    Ví dụ: [PARTIAL] (60%) - Bot có báo giá gói 500 số nhưng quên cung cấp thông tin liên hệ.`;
-    
+async function judgeAnswerBatch(testPairs) {
+    if (!testPairs || testPairs.length === 0) return [];
+
+    // Biến mảng dữ liệu thành chuỗi JSON để đưa vào Prompt
+    const jsonInput = JSON.stringify(testPairs.map((tp, index) => ({
+        id: index,
+        expected: tp.expected,
+        actual: tp.actual
+    })), null, 2);
+
+    const prompt = `Bạn là chuyên gia QA Tester. Dưới đây là danh sách các cặp kết quả [Kỳ vọng] và [Thực tế] định dạng JSON.
+    Hãy so sánh NGỮ NGHĨA và phân loại nhãn cho TỪNG cặp theo quy tắc:
+    - [PASS]: Tỷ lệ giống >= 80%
+    - [PARTIAL]: Tỷ lệ từ 50% đến 79%
+    - [FAIL]: Tỷ lệ < 50%
+
+    DỮ LIỆU ĐẦU VÀO:
+    ${jsonInput}
+
+    YÊU CẦU ĐẦU RA:
+    Bạn PHẢI trả về DUY NHẤT một mảng JSON (không bọc trong markdown \`\`\`json, không giải thích thêm). Mỗi phần tử gồm:
+    - "id": id tương ứng từ đầu vào
+    - "judgment": Định dạng "[NHÃN] (X%) - Giải thích lý do."`;
+
     try {
         const result = await model.generateContent(prompt);
-        return result.response.text().trim();
+        let text = result.response.text().trim();
+        
+        // Dọn dẹp nếu Gemini lỡ bọc markdown
+        if (text.startsWith('```json')) text = text.replace(/```json\n?/g, '');
+        if (text.startsWith('```')) text = text.replace(/```\n?/g, '');
+        if (text.endsWith('```')) text = text.replace(/```/g, '');
+
+        return JSON.parse(text); // Trả về mảng kết quả
     } catch (error) {
-        console.error("Lỗi khi gọi Gemini:", error);
-        return "[ERROR] Lỗi API Gemini";
+        console.error("❌ Lỗi khi gọi Gemini Batching:", error);
+        // Trả về lỗi mảng dự phòng để app không bị sập
+        return testPairs.map((_, i) => ({ id: i, judgment: "[ERROR] Lỗi API Gemini" }));
     }
 }
 
@@ -120,41 +132,67 @@ async function writeResultToSheet(sheets, spreadsheetId, sheetName, rowNumber, a
     });
 }
 
+// ==========================================
+// 5. HÀM CHẠY TEST CHÍNH (ĐÃ TỐI ƯU BATCHING)
+// ==========================================
 async function runTestCases(page, testCases, spreadsheetId, sheetName, chatInputSelector, sheets) {
     let results = { pass: 0, partial: 0, fail: 0, total: testCases.length, details: [] };
+    let testPairs = [];
 
+    // GIAI ĐOẠN 1: Tương tác Chatbot lấy tất cả câu trả lời (Không gọi Gemini ở đây)
     for (let i = 0; i < testCases.length; i++) {
         const test = testCases[i];
-        const rowNumber = i + 2; // Bắt đầu từ hàng 2
-        
         try {
-            console.log(`\n▶ Câu ${i + 1}: ${test.question}`);
-            
+            console.log(`\n▶ Đang lấy câu trả lời từ Bot câu ${i + 1}/${testCases.length}...`);
             const actualAnswer = await askChatbot(page, test.question, chatInputSelector);
-            const scoreResult = await judgeAnswer(test.expected, actualAnswer);
-            
-            // Cập nhật kết quả
-            if (scoreResult.includes('[PASS]')) results.pass++;
-            else if (scoreResult.includes('[PARTIAL]')) results.partial++;
-            else results.fail++;
-
-            results.details.push({
-                question: test.question,
-                expected: test.expected,
-                actual: actualAnswer,
-                judgment: scoreResult
-            });
-
-            // Ghi vào Google Sheet
-            await writeResultToSheet(sheets, spreadsheetId, sheetName, rowNumber, actualAnswer, scoreResult);
-
-            console.log(`  └ Kết quả: ${scoreResult}`);
-            await page.waitForTimeout(1000);
-            
+            testPairs.push({ question: test.question, expected: test.expected, actual: actualAnswer });
+            await page.waitForTimeout(500); 
         } catch (error) {
-            console.error(`Lỗi ở câu ${i + 1}:`, error.message);
-            results.fail++;
+            console.error(`❌ Lỗi ở câu ${i + 1}:`, error.message);
+            testPairs.push({ question: test.question, expected: test.expected, actual: "[ERROR] Bot không trả lời" });
         }
+    }
+
+    // GIAI ĐOẠN 2: Gọi Gemini 1 LẦN để chấm điểm tất cả
+    console.log(`\n🤖 Đang gửi ${testPairs.length} câu cho Gemini chấm điểm chung...`);
+    const judgments = await judgeAnswerBatch(testPairs);
+
+    // GIAI ĐOẠN 3: Xử lý đếm kết quả và gom dữ liệu ghi Google Sheet
+    const sheetUpdateValues = []; // Mảng chứa dữ liệu đẩy lên Sheet
+
+    for (let i = 0; i < testPairs.length; i++) {
+        const pair = testPairs[i];
+        // Tìm điểm số tương ứng theo ID từ Gemini trả về
+        const scoreResult = judgments.find(j => j.id === i)?.judgment || "[ERROR] Lỗi chấm điểm";
+
+        // Đếm logic (Phiên bản chuẩn chỉnh)
+        const scoreUpper = scoreResult.toUpperCase();
+        if (scoreUpper.includes('[PASS]')) results.pass++;
+        else if (scoreUpper.includes('[PARTIAL]')) results.partial++;
+        else results.fail++;
+
+        results.details.push({
+            question: pair.question, expected: pair.expected,
+            actual: pair.actual, judgment: scoreResult
+        });
+
+        // Đưa vào mảng dữ liệu Google Sheet [Thực tế, Đánh giá]
+        sheetUpdateValues.push([pair.actual, scoreResult]);
+        console.log(`  └ Câu ${i + 1}: ${scoreResult}`);
+    }
+
+    // GIAI ĐOẠN 4: Ghi TẤT CẢ vào Google Sheet bằng 1 lệnh duy nhất!
+    try {
+        console.log("\n📝 Đang ghi toàn bộ báo cáo vào Google Sheet...");
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: spreadsheetId,
+            range: `${sheetName}!D2:E${1 + sheetUpdateValues.length}`, // Quét 1 vùng lớn để ghi
+            valueInputOption: 'USER_ENTERED',
+            requestBody: { values: sheetUpdateValues },
+        });
+        console.log("✅ Đã ghi thành công!");
+    } catch (sheetError) {
+        console.error("❌ Lỗi khi ghi vào Sheet:", sheetError);
     }
 
     return results;
